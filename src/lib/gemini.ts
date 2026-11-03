@@ -89,30 +89,62 @@ export async function geminiAudioCall(
   opts: ApiCallOptions
 ): Promise<{ blob: Blob }> {
   const model = getSelectedTtsModel();
-  const chunks = splitTextForSpeech(text, model.startsWith("gemini-3.8-") ? 1200 : 180);
+
+  if (model.startsWith("gemini-3.8-")) {
+    // מודלי 3.8 תומכים בקריינות ארוכה (עד כמה דקות) בבקשת interactions אחת.
+    // שולחים את כל הטקסט כסדרת "content" items בבקשה יחידה אחת, בדיוק כמו
+    // בפודקאסט רב-דוברים, במקום לפצל להרבה קריאות API נפרדות ולחבר אותן
+    // ידנית: ריבוי קריאות עצמאיות הוא שגרם לשיבושים בדיוק במעברים בין
+    // הנתחים (=פסקאות), כי כל קריאה לא ידעה כלום על מה שקרה בקריאה הקודמת,
+    // ואיחוי האודיו שלהן דרך Web Audio API (decode/resample בדפדפן) יצר
+    // רעשים וקטיעות. בבקשה אחת Google מייצרת את כל האודיו ברצף אחד, ו-
+    // extractInteractionWav כבר יודע לשרשר כראוי כמה בלוקים (PCM אחרי הסרת
+    // 44 בייטי ה-header), בדיוק כפי שגוגל ממליצים בתיעוד.
+    const chunks = splitTextForSpeech(text, 6000);
+    const data = await interactionsCall(model, {
+      model,
+      input: [{
+        type: "user_input",
+        content: chunks.map((chunk) => ({
+          type: "text",
+          text: chunk,
+          annotations: [{ type: "speech_metadata", style: styleInstruction }],
+        })),
+      }],
+      response_format: { type: "audio", mime_type: "audio/wav", sample_rate: 24000 },
+      generation_config: { speech_config: [{ voice: voiceName }] },
+    }, opts);
+    const blob = extractInteractionWav(data);
+    console.info("[VoiceMaster][TTS]", JSON.stringify({
+      model,
+      totalChunks: chunks.length,
+      inputCharacters: text.length,
+      finalAudioBytes: blob.size,
+      status: data?.status || "unknown",
+    }));
+    return { blob };
+  }
+
+  const chunks = splitTextForSpeech(text, 180);
   const audio: Blob[] = [];
   for (const chunk of chunks) {
-    if (model.startsWith("gemini-3.8-")) {
-      audio.push(await gemini38SingleSpeaker(chunk, styleInstruction, voiceName, model, opts));
-    } else {
-      const data = await apiCall(model, {
-        contents: [{ parts: [{ text: prompts.narration(styleInstruction, chunk) }] }],
-        generationConfig: {
-          responseModalities: ["AUDIO"],
-          speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName } } },
-        },
-      }, opts);
-      const segment = extractAudio(data);
-      console.info("[VoiceMaster][TTS]", JSON.stringify({
-        model,
-        chunk: audio.length + 1,
-        totalChunks: chunks.length,
-        inputCharacters: chunk.length,
-        audioBytes: segment.size,
-        finishReason: data?.candidates?.[0]?.finishReason || "unknown",
-      }));
-      audio.push(segment);
-    }
+    const data = await apiCall(model, {
+      contents: [{ parts: [{ text: prompts.narration(styleInstruction, chunk) }] }],
+      generationConfig: {
+        responseModalities: ["AUDIO"],
+        speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName } } },
+      },
+    }, opts);
+    const segment = extractAudio(data);
+    console.info("[VoiceMaster][TTS]", JSON.stringify({
+      model,
+      chunk: audio.length + 1,
+      totalChunks: chunks.length,
+      inputCharacters: chunk.length,
+      audioBytes: segment.size,
+      finishReason: data?.candidates?.[0]?.finishReason || "unknown",
+    }));
+    audio.push(segment);
   }
   const blob = await joinWavSegments(audio);
   console.info("[VoiceMaster][TTS]", JSON.stringify({
@@ -148,7 +180,7 @@ export async function geminiPodcastAudioCall(
           }],
         })),
       }],
-      response_format: { type: "audio" },
+      response_format: { type: "audio", mime_type: "audio/wav", sample_rate: 24000 },
       generation_config: {
         speech_config: {
           mode: "conversational",
@@ -385,27 +417,6 @@ async function interactionsCall(model: string, payload: unknown, opts: ApiCallOp
     }
   }
   throw lastError || new ApiCallError("No API key", "לא הוגדר מפתח API.");
-}
-
-async function gemini38SingleSpeaker(
-  text: string, style: string, voice: string, model: string, opts: ApiCallOptions
-): Promise<Blob> {
-  const data = await interactionsCall(model, {
-    model,
-    input: [{
-      type: "user_input",
-      content: [{
-        type: "text",
-        text,
-        annotations: [{ type: "speech_metadata", style }],
-      }],
-    }],
-    response_format: { type: "audio" },
-    generation_config: { speech_config: [{ voice }] },
-  }, opts);
-  // כל בקשה קצרה ומוגבלת כדי למנוע מהמודל להחזיר אודיו חלקי
-  // בטקסטים ארוכים. האיחוד מתבצע ב-geminiAudioCall.
-  return extractInteractionWav(data, true);
 }
 
 function parsePodcastTurns(
