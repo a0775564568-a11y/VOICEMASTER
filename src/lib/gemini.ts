@@ -112,7 +112,11 @@ export async function geminiAudioCall(
         })),
       }],
       response_format: { type: "audio", mime_type: "audio/wav", sample_rate: 24000 },
-      generation_config: { speech_config: [{ voice: voiceName }] },
+      generation_config: {
+        // TTS responses need a much larger output budget than ordinary text.
+        max_output_tokens: 16384,
+        speech_config: [{ voice: voiceName }],
+      },
     }, opts);
     const blob = extractInteractionWav(data);
     console.info("[VoiceMaster][TTS]", JSON.stringify({
@@ -182,6 +186,7 @@ export async function geminiPodcastAudioCall(
       }],
       response_format: { type: "audio", mime_type: "audio/wav", sample_rate: 24000 },
       generation_config: {
+        max_output_tokens: 16384,
         speech_config: {
           mode: "conversational",
           speakers: speakers.map((speaker) => ({ speaker: speaker.name, voice: speaker.voice })),
@@ -381,7 +386,7 @@ async function interactionsCall(model: string, payload: unknown, opts: ApiCallOp
   let lastError: ApiCallError | null = null;
   for (const key of keys) {
     try {
-      const response = await fetch("https://generativelanguage.googleapis.com/v1beta/interactions", {
+      const response = await fetch("/api/gemini-interactions", {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-goog-api-key": key },
         body: JSON.stringify(payload),
@@ -398,8 +403,9 @@ async function interactionsCall(model: string, payload: unknown, opts: ApiCallOp
       const id = data?.id;
       for (let attempt = 0; id && ["in_progress", "running", "pending"].includes(String(data?.status || "").toLowerCase()) && attempt < 90; attempt++) {
         await new Promise((resolve) => setTimeout(resolve, 1000));
-        const poll = await fetch(`https://generativelanguage.googleapis.com/v1beta/interactions/${encodeURIComponent(id)}`, {
+        const poll = await fetch(`/api/gemini-interactions?id=${encodeURIComponent(id)}`, {
           headers: { "x-goog-api-key": key },
+          cache: "no-store",
         });
         data = await poll.json();
         if (!poll.ok) throw new ApiCallError(data?.error?.message || "Interactions polling failed", getHebrewApiError(poll.status, data?.error?.message), poll.status);
